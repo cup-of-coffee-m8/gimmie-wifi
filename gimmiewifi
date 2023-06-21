@@ -1,0 +1,139 @@
+#!/bin/bash
+
+if [ "$EUID" -ne 0 ]
+  	then echo "[!] Please run gimmiewifi as root"
+  	exit 1
+fi
+
+if [ $1 = "stop" ]; then
+	iptables --flush
+	iptables --flush -t nat
+	iptables --flush -t mangle
+	systemctl stop dnsmasq
+	systemctl stop hostapd
+	killall -9 dnsmasq 2> /dev/null
+	systemctl restart NetworkManager
+	systemctl restart systemd-resolved
+	echo "[!] Access point terminated - networking restored to normal"
+else
+  	iptables --flush
+	iptables --flush -t nat
+	iptables --flush -t mangle
+	systemctl stop dnsmasq
+	systemctl stop hostapd
+	killall -9 dnsmasq 2> /dev/null
+	killall -9 systemd-resolved 2> /dev/null
+
+	touch /etc/hostapd/hostapd.conf
+	touch /etc/dnsmasq.conf
+
+	sysctl -w --quiet net.ipv4.ip_forward=1
+	sysctl -p 2>&1
+
+	ifaces=( $(ip addr list | awk -F ":" '/^[0-9]+:/{dev=$2 ; if ( dev !~ /^ lo$/) {print $2}}') )
+
+	declare -a nums
+
+	for n in {1..999} 
+	do
+		num=$(printf "%03d\n" $n)
+		nums+=($num)
+	done
+
+	rand_num=${nums[RANDOM%${#nums[@]}]}
+
+	echo ""
+	echo "             o O                 "
+	echo "           o | | O             "
+	echo "         O | | | | O         "
+	echo "       o | | | | | | O     "
+	echo "     o | | | | | | | | O    ~  Gimmie WiFi ~     "
+	echo "   O ------------------- o ------------------- O" 
+	echo "                           O | | | | | | | | o"
+	echo "                             O | | | | | | o  "
+	echo "                               O | | | | O    "
+	echo "                                 O | | o      "
+	echo "                                   O o        "
+	echo -e "\n               Spin-up an AP... FAST!\n"
+	echo -e "[*] The available interfaces are:"
+	echo "---------------------------------------"
+
+	i=1
+	for if in "${ifaces[@]}"
+	do
+		echo [$i] $if
+		i=$((i+1))
+	done
+	echo "[q] quit"
+
+	echo ""
+	read -p "[?] Please select an interface to host the AP (e.g 1,2): " int_select
+
+	if [ $int_select = "q" ]
+	then
+		exit 0
+	fi
+
+	systemctl stop systemd-resolved
+
+	int_select=$((int_select - 1))
+	iface=${ifaces[$int_select]}
+
+	echo ""
+	read -p "[?] Please select an upstream interface (e.g 1,2): " int_select
+	int_select=$((int_select - 1))
+	upstrm=${ifaces[$int_select]}
+
+	echo -e "interface=$iface" > /etc/hostapd/hostapd.conf
+	echo -e "channel=11\nhw_mode=g\ndriver=nl80211\nssid=testnet${rand_num}\nwpa=2\nwpa_passphrase=TH15_is_a_P455W0RD\041\nwpa_key_mgmt=WPA-PSK\nwpa_pairwise=TKIP\nwpa_pairwise=CCMP\nmacaddr_acl=0\nauth_algs=3\nignore_broadcast_ssid=0" >> /etc/hostapd/hostapd.conf
+
+	echo -e "interface=$iface" > /etc/dnsmasq.conf
+	echo -e "log-facility=/var/log/dnsmasq.log\ndhcp-range=10.0.0.2,10.0.0.100,12h\nlog-queries\nno-resolv\nserver=8.8.8.8\nserver=8.8.4.4" >> /etc/dnsmasq.conf
+
+	declare -a first_byte
+	declare -i val=2
+
+	while [ $val -le 254 ]
+	do
+		first_byte+=($val)
+		val=$((val+6))
+	done
+
+	rand=${first_byte[RANDOM%${#first_byte[@]}]}
+
+	new_mac=$(printf '%02X:%02X:%02X:%02X:%02X:%02X' $[rand] $[RANDOM%255] $[RANDOM%255] $[RANDOM%255] $[RANDOM%255] $[RANDOM%255])	
+
+	ip link set dev $iface down
+	ip link set dev $iface address $new_mac
+	ip link set dev $iface up
+
+	ip addr add 10.0.0.1/24 dev $iface > /dev/null 2>&1
+	ip route add 10.0.0.0/24 via 10.0.0.1 > /dev/null 2>&1
+	iptables --table nat --append POSTROUTING --out-interface $upstrm -j MASQUERADE
+	iptables --append FORWARD --in-interface $iface -j ACCEPT
+
+	systemctl start dnsmasq
+	sleep 0.5
+	systemctl start hostapd
+
+	echo -e "\n[!] Success!"
+	echo -e "\n[*] The network details are:"
+	echo "---------------------------------------"
+	echo "    [-] SSID: testnet${rand_num}"
+	echo -e "    [-] PWD:  TH15_is_a_P455W0RD\041"
+	echo "    [-] MAC:  ${new_mac}"
+	echo "    [-] IF:   ${iface}"
+	echo "---------------------------------------"
+	echo 
+	read -p "[?] Capture on this new AP interface? [N/y]: " cap_select
+
+	if [[ $cap_select == "Y" || $cap_select == "y" ]]; then
+			nohup /usr/bin/tcpdump -i $iface -w "/tmp/testnet${rand_num}.pcap" >/dev/null 2>&1 &
+			echo -e "\n[*] Capture started and saved at /tmp/testnet${rand_num}.pcap"
+			echo -e "\n[!] Enjoy the WiFis!"
+			echo -e "\n[*] To stop the access point cleanly, run \"sudo gimmiewifi stop\""
+	else
+			echo -e "\n[!] Enjoy the WiFis!"
+			echo -e "\n[*] To stop the access point cleanly, run \"sudo gimmiewifi stop\""
+	fi
+fi
